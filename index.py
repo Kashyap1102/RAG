@@ -2,10 +2,8 @@ import os
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-# from langchain_cohere import CohereEmbeddings
 from langchain_qdrant import QdrantVectorStore
-# from langchain_openai import OpenAIEmbeddings
-from langchain_cohere import CohereEmbeddings
+from ollama_embeddings import OllamaEmbeddings
 
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -40,20 +38,26 @@ if not documents:
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
-    chunk_overlap=500
+    chunk_overlap=100
 )
 
 chunks = text_splitter.split_documents(documents)
 
+# Create OllamaEmbeddings instance
+embeddings = OllamaEmbeddings(os.getenv("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large"))
 
-embeddings = CohereEmbeddings(model="embed-english-v3.0")
-
-# embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-
-vectorstore = QdrantVectorStore.from_documents(
-    documents=chunks,
-    embedding=embeddings,
-    collection_name="mlpdfs",
-    host="localhost",
-    port=6333,
-    force_recreate=True)
+try:
+    vectorstore = QdrantVectorStore.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        collection_name="mlpdfs",
+        host="localhost",
+        port=6333,
+        force_recreate=True)
+    print(f"Successfully created vectorstore with {len(chunks)} chunks")
+except Exception as e:
+    print(f"Error creating vectorstore: {e}")
+    import traceback
+    traceback.print_exc()
+    exit(1)
+    
