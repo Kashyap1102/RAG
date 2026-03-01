@@ -1,63 +1,99 @@
 import os
+from typing import List, Tuple
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_qdrant import QdrantVectorStore
+from documentLoader import load_docs
 from ollama_embeddings import OllamaEmbeddings
+from rank_bm25 import BM25Okapi
+from sentence_transformers import CrossEncoder
 
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-# Define the path to the MLPDFs folder
-mlpdfs_folder = "MLPDFs"
+documents = load_docs()
 
-# Read all file paths in the MLPDFs folder
-file_paths = []
-if os.path.exists(mlpdfs_folder):
-    for filename in os.listdir(mlpdfs_folder):
-        file_path = os.path.join(mlpdfs_folder, filename)
-        if os.path.isfile(file_path) and filename.endswith('.pdf'):
-            file_paths.append(file_path)
-else:
-    print(f"Warning: {mlpdfs_folder} folder not found.")
-            
-# Load documents from all PDF files
-documents = []
-for file_path in file_paths:
-    try:
-        loader = PyPDFLoader(file_path)
-        documents.extend(loader.load())
-    except Exception as e:
-        print(f"Error loading {file_path}: {e}")
-
-if not documents:
-    print("Error: No documents loaded. Please ensure PDF files exist in the MLPDFs folder.")
-    exit(1)
 
 # Split documents into smaller chunks
+def split_docs_create_embeddings():
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100,
+    )
+    chunks = text_splitter.split_documents(documents)
+    for i, chunk in enumerate(chunks):
+        chunk.metadata["doc_id"] = i
 
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=100
-)
+    embeddings = OllamaEmbeddings(os.getenv("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large"))
 
-chunks = text_splitter.split_documents(documents)
+    try:
+        QdrantVectorStore.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            collection_name="mlpdfs",
+            host="localhost",
+            port=6333,
+            force_recreate=True,
+            timeout=120,
+        )
+        print(f"Successfully created vectorstore with {len(chunks)} chunks")
 
-# Create OllamaEmbeddings instance
-embeddings = OllamaEmbeddings(os.getenv("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large"))
+    except Exception as e:
+        print(f"Error creating vectorstore: {e}")
+        import traceback
 
-try:
-    vectorstore = QdrantVectorStore.from_documents(
-        documents=chunks,
-        embedding=embeddings,
+        traceback.print_exc()
+        exit(1)
+
+
+def vector_search(query, top_k=3) -> List[Tuple[int, float]]:
+    embeddings = OllamaEmbeddings(model=os.getenv("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large"))
+    vector_store = QdrantVectorStore.from_existing_collection(
         collection_name="mlpdfs",
         host="localhost",
         port=6333,
-        force_recreate=True)
-    print(f"Successfully created vectorstore with {len(chunks)} chunks")
-except Exception as e:
-    print(f"Error creating vectorstore: {e}")
-    import traceback
-    traceback.print_exc()
-    exit(1)
-    
+        embedding=embeddings,
+        validate_collection_config=False,
+    )
+
+    embedded_query = embeddings.embed_query(query)
+    search_results = vector_store.similarity_search_with_score_by_vector(embedded_query, top_k)
+    print(f"Found {len(search_results)} similar documents")
+
+    scored_results: List[Tuple[int, float]] = []
+    for rank, (doc, score) in enumerate(search_results):
+        raw_doc_id = doc.metadata.get("doc_id", rank)
+        try:
+            doc_id = int(raw_doc_id)
+        except (TypeError, ValueError):
+            doc_id = rank
+        scored_results.append((doc_id, float(score)))
+
+    return scored_results
+
+
+def bm25_search(query, top_k=3):
+    tokenized_docs = [doc.page_content.lower().split() for doc in documents]
+    bm25 = BM25Okapi(tokenized_docs)
+    tokenized_query = query.lower().split()
+    scores = bm25.get_scores(tokenized_query)
+    ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+    return ranked[:top_k]
+
+
+def rerank(query, candidate_ids, top_k=3):
+    pairs = [(query, documents[i].page_content) for i in candidate_ids]
+    cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    scores = cross_encoder.predict(pairs)
+
+    ranked = sorted(
+        zip(candidate_ids, scores),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    return ranked[:top_k]
+
+
+
+split_docs_create_embeddings()
