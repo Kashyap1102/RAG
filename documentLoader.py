@@ -18,6 +18,8 @@ def load_docs(folder = "MLPDFs"):
                 file_paths.append(file_path)
     else:
         print(f"Warning: {folder} folder not found.")
+
+    file_paths.sort()
                 
     # Load documents from all PDF files
     documents = []
@@ -25,10 +27,11 @@ def load_docs(folder = "MLPDFs"):
         try:
             loader = PyPDFLoader(file_path)
             documents.extend(loader.load())
-            return documents
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
 
     if not documents:
         print("Error: No documents loaded. Please ensure PDF files exist in the MLPDFs folder.")
         exit(1)
+
+    return documents
